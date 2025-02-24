@@ -2,71 +2,77 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'ap-south-1' // Change to your AWS region
-        ECR_REPO = '211125328135.dkr.ecr.ap-south-1.amazonaws.com/gitlab-shell-java-repo' // Change to your ECR repo
-        EKS_CLUSTER = 'extravagant-rock-otter' // Change to your EKS cluster name
-        IMAGE_TAG = "latest"
-        AWS_ACCOUNT_ID = "211125328135" // Change to your AWS Account ID
-        DOCKER_IMAGE = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+        GIT_CREDENTIALS = 'github-credentials'  // Use the credential ID from Jenkins
+        BRANCH = 'main'  // Ensure this matches your repo branch
     }
 
     stages {
         stage('Checkout Code') {
             steps {
-                git 'https://github.com/suguslove10/GitLab-Shell-Java-project-Source-Code.git'
-            }
-        }
-
-        stage('Increment Version') {
-            steps {
                 script {
-                    sh 'echo "1.0.$BUILD_NUMBER" > version.txt'
+                    checkout scm: [
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${BRANCH}"]],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/suguslove10/GitLab-Shell-Java-project-Source-Code.git',
+                            credentialsId: GIT_CREDENTIALS
+                        ]]
+                    ]
                 }
             }
         }
 
-        stage('Build Maven Project') {
+        stage('Build') {
             steps {
-                sh 'mvn clean package -DskipTests'
+                sh 'mvn clean package'
             }
         }
 
-        stage('Login to AWS ECR') {
+        stage('Test') {
             steps {
-                sh '''
-                aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-                '''
+                sh 'mvn test'
             }
         }
 
-        stage('Build & Push Docker Image') {
+        stage('Docker Build & Push') {
+            environment {
+                IMAGE_NAME = 'suguslove10/gitlab-shell-java'
+                TAG = 'latest'
+            }
             steps {
-                sh '''
-                docker build -t $DOCKER_IMAGE .
-                docker push $DOCKER_IMAGE
-                '''
+                script {
+                    sh """
+                        docker build -t ${IMAGE_NAME}:${TAG} .
+                        echo "Pushing Docker image to Docker Hub..."
+                        docker login -u \$DOCKER_USERNAME -p \$DOCKER_PASSWORD
+                        docker push ${IMAGE_NAME}:${TAG}
+                    """
+                }
             }
         }
 
-        stage('Deploy to EKS') {
+        stage('Deploy to Server') {
             steps {
-                sh '''
-                aws eks --region $AWS_REGION update-kubeconfig --name $EKS_CLUSTER
-                kubectl set image deployment/my-app my-app-container=$DOCKER_IMAGE --namespace=default
-                '''
+                script {
+                    sh """
+                        ssh -i /path/to/your.pem ubuntu@your-ec2-ip "
+                        docker pull ${IMAGE_NAME}:${TAG} &&
+                        docker stop myapp || true &&
+                        docker rm myapp || true &&
+                        docker run -d --name myapp -p 8080:8080 ${IMAGE_NAME}:${TAG}
+                        "
+                    """
+                }
             }
         }
+    }
 
-        stage('Commit Version Update') {
-            steps {
-                sh '''
-                git config --global user.email "your-email@example.com"
-                git config --global user.name "Your Name"
-                git add version.txt
-                git commit -m "Updated version to 1.0.$BUILD_NUMBER"
-                git push origin main
-                '''
-            }
+    post {
+        success {
+            echo "Pipeline executed successfully!"
+        }
+        failure {
+            echo "Pipeline failed!"
         }
     }
 }

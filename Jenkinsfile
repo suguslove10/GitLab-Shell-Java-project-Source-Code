@@ -2,11 +2,12 @@ pipeline {
     agent any
 
     environment {
-        AWS_ACCOUNT_ID = '<your-aws-account-id>'
-        AWS_REGION = '<your-region>'
-        ECR_REPO_NAME = 'gitlab-shell-java'
-        IMAGE_TAG = "gitlab-shell-java:${BUILD_NUMBER}"
-        EKS_CLUSTER_NAME = '<your-cluster-nam'
+        AWS_REGION = 'ap-south-1' // Change to your AWS region
+        ECR_REPO = '211125328135.dkr.ecr.ap-south-1.amazonaws.com/gitlab-shell-java-repo' // Change to your ECR repo
+        EKS_CLUSTER = 'extravagant-rock-otter' // Change to your EKS cluster name
+        IMAGE_TAG = "latest"
+        AWS_ACCOUNT_ID = "211125328135" // Change to your AWS Account ID
+        DOCKER_IMAGE = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
     }
 
     stages {
@@ -18,49 +19,53 @@ pipeline {
 
         stage('Increment Version') {
             steps {
-                sh 'mvn versions:set -DnewVersion=1.0.${BUILD_NUMBER}'
-            }
-        }
-
-        stage('Build Maven Artifact') {
-            steps {
-                sh 'mvn clean package'
-            }
-        }
-
-        stage('Build and Push Docker Image') {
-            steps {
                 script {
-                    sh """
-                        docker build -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG .
-                        docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
-                    """
+                    sh 'echo "1.0.$BUILD_NUMBER" > version.txt'
                 }
+            }
+        }
+
+        stage('Build Maven Project') {
+            steps {
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('Login to AWS ECR') {
+            steps {
+                sh '''
+                aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+                '''
+            }
+        }
+
+        stage('Build & Push Docker Image') {
+            steps {
+                sh '''
+                docker build -t $DOCKER_IMAGE .
+                docker push $DOCKER_IMAGE
+                '''
             }
         }
 
         stage('Deploy to EKS') {
             steps {
-                script {
-                    sh """
-                        aws eks --region $AWS_REGION update-kubeconfig --name $EKS_CLUSTER_NAME
-                        kubectl set image deployment/gitlab-shell-java gitlab-shell-java=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
-                    """
-                }
+                sh '''
+                aws eks --region $AWS_REGION update-kubeconfig --name $EKS_CLUSTER
+                kubectl set image deployment/my-app my-app-container=$DOCKER_IMAGE --namespace=default
+                '''
             }
         }
 
         stage('Commit Version Update') {
             steps {
-                script {
-                    sh """
-                        git config --global user.email "your-email@example.com"
-                        git config --global user.name "Your Name"
-                        git add .
-                        git commit -m "Updated version to 1.0.${BUILD_NUMBER}"
-                        git push origin main
-                    """
-                }
+                sh '''
+                git config --global user.email "your-email@example.com"
+                git config --global user.name "Your Name"
+                git add version.txt
+                git commit -m "Updated version to 1.0.$BUILD_NUMBER"
+                git push origin main
+                '''
             }
         }
     }

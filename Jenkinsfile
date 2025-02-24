@@ -2,6 +2,7 @@ pipeline {
     agent any
     
     environment {
+        DOCKER_PATH         = '/usr/local/bin/docker'
         AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
         AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
         AWS_ACCOUNT_ID        = credentials('AWS_ACCOUNT_ID')
@@ -22,16 +23,15 @@ pipeline {
         stage('Check Prerequisites') {
             steps {
                 script {
-                    // Check for Docker
-                    def dockerCheck = sh(script: 'which docker', returnStatus: true)
-                    if (dockerCheck != 0) {
-                        error "Docker is not installed. Please install Docker Desktop for Mac."
+                    // Check for Docker using absolute path
+                    if (!fileExists(DOCKER_PATH)) {
+                        error "Docker is not installed at ${DOCKER_PATH}. Please verify Docker Desktop installation."
                     }
                     
-                    // Verify Docker is running
-                    def dockerPs = sh(script: 'docker ps', returnStatus: true)
+                    // Verify Docker is running using absolute path
+                    def dockerPs = sh(script: "${DOCKER_PATH} ps", returnStatus: true)
                     if (dockerPs != 0) {
-                        error "Cannot connect to Docker daemon. Please ensure Docker Desktop is running and you have the correct permissions."
+                        error "Cannot connect to Docker daemon. Please ensure Docker Desktop is running."
                     }
                     
                     // Check for AWS CLI
@@ -71,11 +71,11 @@ pipeline {
                         aws configure set default.region ${AWS_REGION}
                     """
                     
-                    // Login to ECR and build/push image
+                    // Login to ECR and build/push image using absolute Docker path
                     sh """
-                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                        docker build -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} .
-                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                        aws ecr get-login-password --region ${AWS_REGION} | ${DOCKER_PATH} login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        ${DOCKER_PATH} build -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} .
+                        ${DOCKER_PATH} push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
                     """
                 }
             }

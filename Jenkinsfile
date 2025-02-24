@@ -17,16 +17,23 @@ pipeline {
         maven 'Maven 3.9.8'
         jdk 'JDK11'
     }
-
+    
     stages {
         stage('Increment Version') {
             steps {
                 script {
-                    def pom = readMavenPom file: 'pom.xml'
-                    def currentVersion = pom.version
+                    // Alternative way to read version without readMavenPom
+                    def currentVersion = sh(
+                        script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout",
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Split version and increment
                     def versionParts = currentVersion.split('\\.')
                     def newPatchVersion = versionParts[2].toInteger() + 1
                     def newVersion = "${versionParts[0]}.${versionParts[1]}.${newPatchVersion}"
+                    
+                    // Set new version
                     sh "mvn versions:set -DnewVersion=${newVersion}"
                 }
             }

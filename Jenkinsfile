@@ -100,64 +100,44 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 script {
-                    // Create a temporary kubeconfig file
-                    def tempKubeConfig = "${WORKSPACE}/kubeconfig"
-                    
-                    sh """
-                        # Configure AWS CLI with credentials
-                        ${AWS_PATH} configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
-                        ${AWS_PATH} configure set aws_secret_access_key ${AWS_SECRET_ACCESS_KEY}
-                        ${AWS_PATH} configure set default.region ${AWS_REGION}
+                    // Set up AWS credentials in the environment
+                    withEnv(["AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}",
+                            "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}",
+                            "AWS_DEFAULT_REGION=${AWS_REGION}"]) {
                         
-                        # Create temporary kubeconfig
-                        ${AWS_PATH} eks get-token --cluster-name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} > ${tempKubeConfig}.token
-                        
-                        # Get cluster endpoint
-                        CLUSTER_ENDPOINT=\$(${AWS_PATH} eks describe-cluster --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} --query 'cluster.endpoint' --output text)
-                        
-                        # Create kubeconfig file
-                        cat > ${tempKubeConfig} << EOF
-apiVersion: v1
-clusters:
-- cluster:
-    certificate-authority-data: \$(${AWS_PATH} eks describe-cluster --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} --query 'cluster.certificateAuthority.data' --output text)
-    server: \${CLUSTER_ENDPOINT}
-  name: ${EKS_CLUSTER_NAME}
-contexts:
-- context:
-    cluster: ${EKS_CLUSTER_NAME}
-    user: aws
-  name: aws
-current-context: aws
-kind: Config
-preferences: {}
-users:
-- name: aws
-  user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1beta1
-      command: ${AWS_PATH}
-      args:
-        - eks
-        - get-token
-        - --cluster-name
-        - ${EKS_CLUSTER_NAME}
-        - --region
-        - ${AWS_REGION}
+                        // Create directories for AWS and kubectl config
+                        sh """
+                            mkdir -p ~/.aws
+                            mkdir -p ~/.kube
+                            
+                            # Create AWS credentials file
+                            cat > ~/.aws/credentials << EOF
+[default]
+aws_access_key_id = ${AWS_ACCESS_KEY_ID}
+aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
+region = ${AWS_REGION}
 EOF
-                        
-                        # Use the temporary kubeconfig file
-                        export KUBECONFIG=${tempKubeConfig}
-                        
-                        # Update the deployment
-                        ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
-                        
-                        # Wait for rollout to complete
-                        ${KUBECTL_PATH} rollout status deployment/java-app -n default
-                        
-                        # Clean up
-                        rm -f ${tempKubeConfig} ${tempKubeConfig}.token
-                    """
+
+                            # Create AWS config file
+                            cat > ~/.aws/config << EOF
+[default]
+region = ${AWS_REGION}
+output = json
+EOF
+
+                            # Update kubeconfig
+                            ${AWS_PATH} eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                            
+                            # Update deployment
+                            ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
+                            
+                            # Verify deployment
+                            ${KUBECTL_PATH} rollout status deployment/java-app -n default
+                            
+                            # Clean up sensitive files
+                            rm -rf ~/.aws
+                        """
+                    }
                 }
             }
         }

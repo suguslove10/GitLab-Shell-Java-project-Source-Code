@@ -45,6 +45,12 @@ pipeline {
                     if (!fileExists(KUBECTL_PATH)) {
                         error "kubectl is not installed at ${KUBECTL_PATH}. Please run: brew install kubectl"
                     }
+
+                    // Configure Docker credential store to use pass
+                    sh """
+                        mkdir -p ~/.docker
+                        echo '{"credsStore":""}' > ~/.docker/config.json
+                    """
                 }
             }
         }
@@ -71,9 +77,17 @@ pipeline {
                         ${AWS_PATH} configure set default.region ${AWS_REGION}
                     """
                     
-                    // Login to ECR and build/push image using absolute paths
+                    // Get ECR login password
+                    def ecrPassword = sh(script: "${AWS_PATH} ecr get-login-password --region ${AWS_REGION}", returnStdout: true).trim()
+                    
+                    // Write temporary auth file for Docker
+                    writeFile file: '.docker_auth.txt', text: ecrPassword
+                    
+                    // Login to ECR using the auth file
                     sh """
-                        ${AWS_PATH} ecr get-login-password --region ${AWS_REGION} | ${DOCKER_PATH} login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        cat .docker_auth.txt | ${DOCKER_PATH} login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        rm -f .docker_auth.txt
+                        
                         ${DOCKER_PATH} build -t ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} .
                         ${DOCKER_PATH} push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
                     """

@@ -6,7 +6,7 @@ pipeline {
         AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
         AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
         AWS_ACCOUNT_ID        = credentials('AWS_ACCOUNT_ID')
-        AWS_REGION           = 'us-east-1'
+        AWS_REGION           = 'ap-south-1'
         ECR_REPO_NAME        = 'my-java-app'
         IMAGE_TAG            = "${BUILD_NUMBER}"
         KUBE_CONFIG         = credentials('eks-kubeconfig')

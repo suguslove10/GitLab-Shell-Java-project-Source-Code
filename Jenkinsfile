@@ -13,7 +13,7 @@ pipeline {
     stages {
         stage('Checkout Code') {
             steps {
-                git ''
+                git 'https://github.com/suguslove10/GitLab-Shell-Java-project-Source-Code.git'
             }
         }
 

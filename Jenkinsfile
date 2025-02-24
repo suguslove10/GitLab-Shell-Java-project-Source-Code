@@ -96,16 +96,12 @@ pipeline {
     
     post {
         success {
-            node {
-                echo 'Pipeline completed successfully!'
-                cleanWs()
-            }
+            cleanWs()
+            echo 'Pipeline completed successfully!'
         }
         failure {
-            node {
-                echo 'Pipeline failed!'
-                cleanWs()
-            }
+            cleanWs()
+            echo 'Pipeline failed!'
         }
     }
 }

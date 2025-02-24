@@ -25,7 +25,13 @@ pipeline {
                     // Check for Docker
                     def dockerCheck = sh(script: 'which docker', returnStatus: true)
                     if (dockerCheck != 0) {
-                        error "Docker is not installed. Please install Docker Desktop."
+                        error "Docker is not installed. Please install Docker Desktop for Mac."
+                    }
+                    
+                    // Verify Docker is running
+                    def dockerPs = sh(script: 'docker ps', returnStatus: true)
+                    if (dockerPs != 0) {
+                        error "Cannot connect to Docker daemon. Please ensure Docker Desktop is running and you have the correct permissions."
                     }
                     
                     // Check for AWS CLI
@@ -38,12 +44,6 @@ pipeline {
                     def kubectlCheck = sh(script: 'which kubectl', returnStatus: true)
                     if (kubectlCheck != 0) {
                         error "kubectl is not installed. Run: brew install kubectl"
-                    }
-                    
-                    // Verify Docker is running
-                    def dockerPs = sh(script: 'docker ps', returnStatus: true)
-                    if (dockerPs != 0) {
-                        error "Cannot connect to Docker daemon. Please ensure Docker Desktop is running."
                     }
                 }
             }

@@ -77,6 +77,17 @@ pipeline {
                         ${AWS_PATH} configure set default.region ${AWS_REGION}
                     """
                     
+                    // Create ECR repository if it doesn't exist
+                    def ecrRepoExists = sh(
+                        script: "${AWS_PATH} ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION}",
+                        returnStatus: true
+                    )
+                    
+                    if (ecrRepoExists != 0) {
+                        echo "Creating ECR repository ${ECR_REPO_NAME}"
+                        sh "${AWS_PATH} ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}"
+                    }
+                    
                     // Get ECR login password
                     def ecrPassword = sh(script: "${AWS_PATH} ecr get-login-password --region ${AWS_REGION}", returnStdout: true).trim()
                     

@@ -1,114 +1,87 @@
 pipeline {
     agent any
-    
+
     environment {
-        DOCKER_PATH = '/usr/local/bin/docker'
-        AWS_PATH = '/usr/local/bin/aws'
-        KUBECTL_PATH = '/usr/local/bin/kubectl'
-        AWS_REGION = 'ap-south-1'
-        ECR_REPO_NAME = 'my-java-app'
-        IMAGE_TAG = "${BUILD_NUMBER}"
-        EKS_CLUSTER_NAME = 'extravagant-rock-otter'
-        AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
+        AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
         AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
-        AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')
-    }
-    
-    tools {
-        maven 'Maven 3.9.8'
-        jdk 'JDK11'
+        AWS_REGION            = 'ap-south-1'  // Change to your AWS region
+        ECR_REPO_NAME         = 'gitlab-shell-java-repo'
+        EKS_CLUSTER_NAME      = 'extravagant-rock-otter'
+        IMAGE_TAG             = "v1.${BUILD_NUMBER}"
     }
 
     stages {
-        stage('Check Prerequisites') {
+        stage('Checkout Code') {
             steps {
-                script {
-                    sh """
-                        set -e
-                        echo 'Checking prerequisites...'
-                        docker --version
-                        aws --version
-                        kubectl version --client
-                    """
-                }
+                git 'https://github.com/your-repo-url.git'
             }
         }
 
-        stage('Build Maven Project') {
+        stage('Increment Version') {
             steps {
-                script {
-                    sh """
-                        set -e
-                        echo 'Building Maven project...'
-                        mvn clean package -DskipTests
-                    """
-                }
+                sh '''
+                echo "Incrementing version..."
+                echo $IMAGE_TAG > version.txt
+                git config --global user.email "your-email@example.com"
+                git config --global user.name "Jenkins"
+                git add version.txt
+                git commit -m "Increment version to $IMAGE_TAG"
+                git push origin main
+                '''
             }
         }
-        
-        stage('Run Tests') {
+
+        stage('Build Java Application') {
             steps {
-                script {
-                    sh """
-                        set -e
-                        echo 'Running unit tests...'
-                        mvn test
-                    """
-                }
+                sh 'mvn clean package'
             }
         }
-        
-        stage('Build & Push to ECR') {
+
+        stage('Authenticate AWS ECR') {
             steps {
-                script {
-                    sh """
-                        set -e
-                        echo 'Logging into AWS ECR...'
-                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                        
-                        echo 'Checking if ECR repository exists...'
-                        aws ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION} || \
-                        aws ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}
-                        
-                        echo 'Building Docker image...'
-                        docker build --no-cache -t ${ECR_REPO_NAME}:${IMAGE_TAG} .
-                        
-                        echo 'Tagging and pushing Docker image...'
-                        docker tag ${ECR_REPO_NAME}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
-                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
-                    """
-                }
+                sh '''
+                aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin <AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com
+                '''
             }
         }
-        
-        stage('Deploy to EKS') {
+
+        stage('Build and Push Docker Image to ECR') {
             steps {
-                script {
-                    sh """
-                        set -e
-                        echo 'Updating kubeconfig for EKS cluster...'
-                        aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
-                        
-                        echo 'Deploying application to EKS...'
-                        kubectl apply -f k8s/deployment.yaml
-                        kubectl apply -f k8s/service.yaml
-                        
-                        echo 'Checking deployment status...'
-                        kubectl rollout status deployment/java-app -n default
-                    """
-                }
+                sh '''
+                docker build -t $ECR_REPO_NAME:$IMAGE_TAG .
+                docker tag $ECR_REPO_NAME:$IMAGE_TAG <AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+                docker push <AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+                '''
+            }
+        }
+
+        stage('Deploy to EKS Cluster') {
+            steps {
+                sh '''
+                aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+                kubectl set image deployment/my-deployment my-container=<AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
+                kubectl rollout status deployment/my-deployment
+                '''
+            }
+        }
+
+        stage('Commit Version Update') {
+            steps {
+                sh '''
+                git add version.txt
+                git commit -m "Updated to version $IMAGE_TAG"
+                git push origin main
+                '''
             }
         }
     }
-    
+
     post {
         success {
-            echo 'Pipeline completed successfully!'
-            cleanWs()
+            echo 'CI/CD Pipeline executed successfully!'
         }
         failure {
             echo 'Pipeline failed!'
-            cleanWs()
         }
     }
 }

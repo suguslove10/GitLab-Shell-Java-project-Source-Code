@@ -100,33 +100,53 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 script {
-                    // Set up AWS credentials in the environment
                     withEnv(["AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}",
                             "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}",
                             "AWS_DEFAULT_REGION=${AWS_REGION}"]) {
                         
-                        // Create directories for AWS and kubectl config
                         sh """
-                            mkdir -p ~/.aws
-                            mkdir -p ~/.kube
+                            # Configure AWS CLI
+                            ${AWS_PATH} configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
+                            ${AWS_PATH} configure set aws_secret_access_key ${AWS_SECRET_ACCESS_KEY}
+                            ${AWS_PATH} configure set default.region ${AWS_REGION}
                             
-                            # Create AWS credentials file
-                            cat > ~/.aws/credentials << EOF
-[default]
-aws_access_key_id = ${AWS_ACCESS_KEY_ID}
-aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
-region = ${AWS_REGION}
+                            # Get EKS cluster info
+                            CLUSTER_ENDPOINT=\$(${AWS_PATH} eks describe-cluster --name ${EKS_CLUSTER_NAME} --query "cluster.endpoint" --output text)
+                            CERTIFICATE_DATA=\$(${AWS_PATH} eks describe-cluster --name ${EKS_CLUSTER_NAME} --query "cluster.certificateAuthority.data" --output text)
+                            
+                            # Create kubeconfig
+                            cat > kubeconfig << EOF
+apiVersion: v1
+clusters:
+- cluster:
+    server: \${CLUSTER_ENDPOINT}
+    certificate-authority-data: \${CERTIFICATE_DATA}
+  name: ${EKS_CLUSTER_NAME}
+contexts:
+- context:
+    cluster: ${EKS_CLUSTER_NAME}
+    user: aws
+  name: aws
+current-context: aws
+kind: Config
+preferences: {}
+users:
+- name: aws
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: ${AWS_PATH}
+      args:
+        - eks
+        - get-token
+        - --cluster-name
+        - ${EKS_CLUSTER_NAME}
+        - --region
+        - ${AWS_REGION}
 EOF
 
-                            # Create AWS config file
-                            cat > ~/.aws/config << EOF
-[default]
-region = ${AWS_REGION}
-output = json
-EOF
-
-                            # Update kubeconfig
-                            ${AWS_PATH} eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                            # Use the new kubeconfig
+                            export KUBECONFIG=\${PWD}/kubeconfig
                             
                             # Update deployment
                             ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
@@ -134,8 +154,8 @@ EOF
                             # Verify deployment
                             ${KUBECTL_PATH} rollout status deployment/java-app -n default
                             
-                            # Clean up sensitive files
-                            rm -rf ~/.aws
+                            # Clean up
+                            rm -f kubeconfig
                         """
                     }
                 }

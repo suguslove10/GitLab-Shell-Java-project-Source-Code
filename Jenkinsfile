@@ -113,7 +113,9 @@ EOF
     
     post {
         always {
-            cleanWs()
+            node('any') {
+                cleanWs()
+            }
         }
         success {
             echo 'Pipeline completed successfully!'

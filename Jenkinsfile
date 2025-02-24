@@ -26,28 +26,23 @@ pipeline {
         stage('Check Prerequisites') {
             steps {
                 script {
-                    // Check for Docker using absolute path
                     if (!fileExists(DOCKER_PATH)) {
                         error "Docker is not installed at ${DOCKER_PATH}. Please verify Docker Desktop installation."
                     }
                     
-                    // Verify Docker is running using absolute path
                     def dockerPs = sh(script: "${DOCKER_PATH} ps", returnStatus: true)
                     if (dockerPs != 0) {
                         error "Cannot connect to Docker daemon. Please ensure Docker Desktop is running."
                     }
                     
-                    // Check for AWS CLI using absolute path
                     if (!fileExists(AWS_PATH)) {
                         error "AWS CLI is not installed at ${AWS_PATH}. Please verify AWS CLI installation."
                     }
                     
-                    // Check for kubectl using absolute path
                     if (!fileExists(KUBECTL_PATH)) {
                         error "kubectl is not installed at ${KUBECTL_PATH}. Please run: brew install kubectl"
                     }
 
-                    // Configure Docker credential store to use pass
                     sh """
                         mkdir -p ~/.docker
                         echo '{"credsStore":""}' > ~/.docker/config.json
@@ -71,14 +66,12 @@ pipeline {
         stage('Build and Push Docker Image') {
             steps {
                 script {
-                    // Configure AWS CLI using absolute path
                     sh """
                         ${AWS_PATH} configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
                         ${AWS_PATH} configure set aws_secret_access_key ${AWS_SECRET_ACCESS_KEY}
                         ${AWS_PATH} configure set default.region ${AWS_REGION}
                     """
                     
-                    // Create ECR repository if it doesn't exist
                     def ecrRepoExists = sh(
                         script: "${AWS_PATH} ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION}",
                         returnStatus: true
@@ -89,13 +82,10 @@ pipeline {
                         sh "${AWS_PATH} ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}"
                     }
                     
-                    // Get ECR login password
                     def ecrPassword = sh(script: "${AWS_PATH} ecr get-login-password --region ${AWS_REGION}", returnStdout: true).trim()
                     
-                    // Write temporary auth file for Docker
                     writeFile file: '.docker_auth.txt', text: ecrPassword
                     
-                    // Login to ECR using the auth file
                     sh """
                         cat .docker_auth.txt | ${DOCKER_PATH} login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
                         rm -f .docker_auth.txt
@@ -110,36 +100,38 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 script {
-                    // Create kubeconfig directory if it doesn't exist
-                    sh "mkdir -p ~/.kube"
-                    
-                    // Configure kubectl with AWS credentials
                     sh """
+                        # Configure AWS CLI
+                        ${AWS_PATH} configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
+                        ${AWS_PATH} configure set aws_secret_access_key ${AWS_SECRET_ACCESS_KEY}
+                        ${AWS_PATH} configure set default.region ${AWS_REGION}
+                        
+                        # Create necessary directories
+                        mkdir -p ~/.kube
+                        mkdir -p ~/.aws
+                        
+                        # Create AWS credentials file
+                        cat > ~/.aws/credentials << EOF
+[default]
+aws_access_key_id = ${AWS_ACCESS_KEY_ID}
+aws_secret_access_key = ${AWS_SECRET_ACCESS_KEY}
+region = ${AWS_REGION}
+EOF
+                        
                         # Update kubeconfig
                         ${AWS_PATH} eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
                         
-                        # Create a temporary credentials file for kubectl
-                        cat > ~/.kube/aws-credentials.json << EOF
-{
-  "apiVersion": "client.authentication.k8s.io/v1beta1",
-  "kind": "ExecCredential",
-  "spec": {
-    "interactive": false
-  },
-  "status": {
-    "token": "\$(${AWS_PATH} eks get-token --cluster-name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} | jq -r '.status.token')"
-  }
-}
-EOF
+                        # Get token and create credentials
+                        TOKEN=\$(${AWS_PATH} eks get-token --cluster-name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} | jq -r '.status.token')
                         
-                        # Update deployment
-                        KUBECONFIG=~/.kube/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
+                        # Update deployment with new image
+                        ${KUBECTL_PATH} --token="\${TOKEN}" set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
                         
-                        # Check deployment status
-                        KUBECONFIG=~/.kube/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials ${KUBECTL_PATH} rollout status deployment/java-app -n default
+                        # Verify deployment status
+                        ${KUBECTL_PATH} --token="\${TOKEN}" rollout status deployment/java-app -n default
                         
-                        # Clean up credentials
-                        rm -f ~/.kube/aws-credentials.json
+                        # Clean up sensitive files
+                        rm -f ~/.aws/credentials
                     """
                 }
             }

@@ -4,6 +4,7 @@ pipeline {
     environment {
         DOCKER_PATH         = '/usr/local/bin/docker'
         AWS_PATH            = '/usr/local/bin/aws'
+        KUBECTL_PATH        = '/usr/local/bin/kubectl'
         AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
         AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
         AWS_ACCOUNT_ID        = credentials('AWS_ACCOUNT_ID')
@@ -40,10 +41,9 @@ pipeline {
                         error "AWS CLI is not installed at ${AWS_PATH}. Please verify AWS CLI installation."
                     }
                     
-                    // Check for kubectl
-                    def kubectlCheck = sh(script: 'which kubectl', returnStatus: true)
-                    if (kubectlCheck != 0) {
-                        error "kubectl is not installed. Run: brew install kubectl"
+                    // Check for kubectl using absolute path
+                    if (!fileExists(KUBECTL_PATH)) {
+                        error "kubectl is not installed at ${KUBECTL_PATH}. Please run: brew install kubectl"
                     }
                 }
             }
@@ -86,8 +86,8 @@ pipeline {
                 script {
                     sh """
                         ${AWS_PATH} eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-                        kubectl set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
-                        kubectl rollout status deployment/java-app -n default
+                        ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
+                        ${KUBECTL_PATH} rollout status deployment/java-app -n default
                     """
                 }
             }

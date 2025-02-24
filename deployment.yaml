@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab-shell-java
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gitlab-shell-java
+  template:
+    metadata:
+      labels:
+        app: gitlab-shell-java
+    spec:
+      containers:
+      - name: gitlab-shell-java
+        image: <aws-account-id>.dkr.ecr.<region>.amazonaws.com/gitlab-shell-java:latest
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab-shell-java-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: gitlab-shell-java
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080

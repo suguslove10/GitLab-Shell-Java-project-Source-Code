@@ -14,6 +14,7 @@ pipeline {
         KUBE_CONFIG         = credentials('eks-kubeconfig')
         GITHUB_CREDENTIALS  = credentials('github-credentials')
         EKS_CLUSTER_NAME    = 'ridiculous-grunge-otter'
+        PATH                = "/usr/local/bin:${env.PATH}"
     }
     
     tools {
@@ -109,10 +110,36 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 script {
+                    // Create kubeconfig directory if it doesn't exist
+                    sh "mkdir -p ~/.kube"
+                    
+                    // Configure kubectl with AWS credentials
                     sh """
+                        # Update kubeconfig
                         ${AWS_PATH} eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER_NAME}
-                        ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
-                        ${KUBECTL_PATH} rollout status deployment/java-app -n default
+                        
+                        # Create a temporary credentials file for kubectl
+                        cat > ~/.kube/aws-credentials.json << EOF
+{
+  "apiVersion": "client.authentication.k8s.io/v1beta1",
+  "kind": "ExecCredential",
+  "spec": {
+    "interactive": false
+  },
+  "status": {
+    "token": "\$(${AWS_PATH} eks get-token --cluster-name ${EKS_CLUSTER_NAME} --region ${AWS_REGION} | jq -r '.status.token')"
+  }
+}
+EOF
+                        
+                        # Update deployment
+                        KUBECONFIG=~/.kube/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials ${KUBECTL_PATH} set image deployment/java-app java-app=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG} -n default
+                        
+                        # Check deployment status
+                        KUBECONFIG=~/.kube/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials ${KUBECTL_PATH} rollout status deployment/java-app -n default
+                        
+                        # Clean up credentials
+                        rm -f ~/.kube/aws-credentials.json
                     """
                 }
             }

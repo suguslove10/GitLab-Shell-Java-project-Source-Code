@@ -1,14 +1,17 @@
 pipeline {
-    agent {
-        label 'built-in'  // Use the built-in node
-    }
+    agent any
     
     environment {
-        AWS_CREDENTIALS = credentials('aws-credentials')
+        DOCKER_PATH = '/usr/local/bin/docker'
+        AWS_PATH = '/usr/local/bin/aws'
+        KUBECTL_PATH = '/usr/local/bin/kubectl'
         AWS_REGION = 'ap-south-1'
         ECR_REPO_NAME = 'my-java-app'
         IMAGE_TAG = "${BUILD_NUMBER}"
         EKS_CLUSTER_NAME = 'ridiculous-grunge-otter'
+        AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
+        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')
     }
     
     tools {
@@ -17,6 +20,21 @@ pipeline {
     }
 
     stages {
+        stage('Check Prerequisites') {
+            steps {
+                script {
+                    // Check for Docker
+                    sh 'docker --version'
+                    
+                    // Check for AWS CLI
+                    sh 'aws --version'
+                    
+                    // Check for kubectl
+                    sh 'kubectl version --client'
+                }
+            }
+        }
+
         stage('Build Maven Project') {
             steps {
                 sh 'mvn clean package -DskipTests'
@@ -32,32 +50,18 @@ pipeline {
         stage('Build & Push to ECR') {
             steps {
                 script {
-                    // Configure AWS CLI
-                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
-                                    credentialsId: 'aws-credentials',
-                                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
                         
-                        // Get AWS Account ID
-                        def awsAccountId = sh(
-                            script: "aws sts get-caller-identity --query Account --output text",
-                            returnStdout: true
-                        ).trim()
+                        # Create repository if it doesn't exist
+                        aws ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION} || \
+                        aws ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}
                         
-                        // Login to ECR
-                        sh """
-                            aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                            
-                            # Create repository if it doesn't exist
-                            aws ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION} || \
-                            aws ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}
-                            
-                            # Build and push Docker image
-                            docker build -t ${ECR_REPO_NAME}:${IMAGE_TAG} .
-                            docker tag ${ECR_REPO_NAME}:${IMAGE_TAG} ${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
-                            docker push ${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
-                        """
-                    }
+                        # Build and push Docker image
+                        docker build -t ${ECR_REPO_NAME}:${IMAGE_TAG} .
+                        docker tag ${ECR_REPO_NAME}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                    """
                 }
             }
         }
@@ -65,23 +69,10 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 script {
-                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
-                                    credentialsId: 'aws-credentials',
-                                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+                    sh """
+                        aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
                         
-                        // Get AWS Account ID
-                        def awsAccountId = sh(
-                            script: "aws sts get-caller-identity --query Account --output text",
-                            returnStdout: true
-                        ).trim()
-                        
-                        sh """
-                            # Update kubeconfig
-                            aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
-                            
-                            # Apply Kubernetes deployment
-                            cat <<EOF | kubectl apply -f -
+                        cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -99,29 +90,30 @@ spec:
     spec:
       containers:
       - name: java-app
-        image: ${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+        image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
         ports:
         - containerPort: 8080
 EOF
-                            
-                            # Wait for deployment
-                            kubectl rollout status deployment/java-app -n default
-                        """
-                    }
+                        
+                        kubectl rollout status deployment/java-app -n default
+                    """
                 }
             }
         }
     }
     
     post {
-        always {
-            cleanWs()  // Clean workspace without node wrapper
-        }
         success {
-            echo 'Pipeline completed successfully!'
+            node('built-in') {
+                echo 'Pipeline completed successfully!'
+                cleanWs()
+            }
         }
         failure {
-            echo 'Pipeline failed!'
+            node('built-in') {
+                echo 'Pipeline failed!'
+                cleanWs()
+            }
         }
     }
 }

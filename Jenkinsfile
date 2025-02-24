@@ -1,78 +1,119 @@
 pipeline {
     agent any
-
+    
     environment {
-        GIT_CREDENTIALS = 'github-credentials'  // Use the credential ID from Jenkins
-        BRANCH = 'main'  // Ensure this matches your repo branch
+        DOCKER_PATH = '/usr/local/bin/docker'
+        AWS_PATH = '/usr/local/bin/aws'
+        KUBECTL_PATH = '/usr/local/bin/kubectl'
+        AWS_REGION = 'ap-south-1'
+        ECR_REPO_NAME = 'my-java-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        EKS_CLUSTER_NAME = 'ridiculous-grunge-otter'
+        AWS_ACCESS_KEY_ID = credentials('AWS_ACCESS_KEY_ID')
+        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
+        AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')
+    }
+    
+    tools {
+        maven 'Maven 3.9.8'
+        jdk 'JDK11'
     }
 
     stages {
-        stage('Checkout Code') {
+        stage('Check Prerequisites') {
             steps {
                 script {
-                    checkout scm: [
-                        $class: 'GitSCM',
-                        branches: [[name: "*/${BRANCH}"]],
-                        userRemoteConfigs: [[
-                            url: 'https://github.com/suguslove10/GitLab-Shell-Java-project-Source-Code.git',
-                            credentialsId: GIT_CREDENTIALS
-                        ]]
-                    ]
+                    // Check for Docker
+                    sh 'docker --version'
+                    
+                    // Check for AWS CLI
+                    sh 'aws --version'
+                    
+                    // Check for kubectl
+                    sh 'kubectl version --client'
                 }
             }
         }
 
-        stage('Build') {
+        stage('Build Maven Project') {
             steps {
-                sh 'mvn clean package'
+                sh 'mvn clean package -DskipTests'
             }
         }
-
-        stage('Test') {
+        
+        stage('Run Tests') {
             steps {
                 sh 'mvn test'
             }
         }
-
-        stage('Docker Build & Push') {
-            environment {
-                IMAGE_NAME = 'suguslove10/gitlab-shell-java'
-                TAG = 'latest'
-            }
+        
+        stage('Build & Push to ECR') {
             steps {
                 script {
                     sh """
-                        docker build -t ${IMAGE_NAME}:${TAG} .
-                        echo "Pushing Docker image to Docker Hub..."
-                        docker login -u \$DOCKER_USERNAME -p \$DOCKER_PASSWORD
-                        docker push ${IMAGE_NAME}:${TAG}
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        
+                        # Create repository if it doesn't exist
+                        aws ecr describe-repositories --repository-names ${ECR_REPO_NAME} --region ${AWS_REGION} || \
+                        aws ecr create-repository --repository-name ${ECR_REPO_NAME} --region ${AWS_REGION}
+                        
+                        # Build and push Docker image
+                        docker build -t ${ECR_REPO_NAME}:${IMAGE_TAG} .
+                        docker tag ${ECR_REPO_NAME}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
                     """
                 }
             }
         }
-
-        stage('Deploy to Server') {
+        
+        stage('Deploy to EKS') {
             steps {
                 script {
                     sh """
-                        ssh -i /path/to/your.pem ubuntu@your-ec2-ip "
-                        docker pull ${IMAGE_NAME}:${TAG} &&
-                        docker stop myapp || true &&
-                        docker rm myapp || true &&
-                        docker run -d --name myapp -p 8080:8080 ${IMAGE_NAME}:${TAG}
-                        "
+                        aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}
+                        
+                        cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: java-app
+  template:
+    metadata:
+      labels:
+        app: java-app
+    spec:
+      containers:
+      - name: java-app
+        image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+        ports:
+        - containerPort: 8080
+EOF
+                        
+                        kubectl rollout status deployment/java-app -n default
                     """
                 }
             }
         }
     }
-
+    
     post {
         success {
-            echo "Pipeline executed successfully!"
+            node('built-in') {
+                echo 'Pipeline completed successfully!'
+                cleanWs()
+            }
         }
         failure {
-            echo "Pipeline failed!"
+            node('built-in') {
+                echo 'Pipeline failed!'
+                cleanWs()
+            }
         }
     }
 }

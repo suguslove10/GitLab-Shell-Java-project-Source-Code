@@ -1,5 +1,7 @@
 pipeline {
-    agent any
+    agent {
+        label 'built-in'  // Use the built-in node
+    }
     
     environment {
         AWS_CREDENTIALS = credentials('aws-credentials')
@@ -113,9 +115,7 @@ EOF
     
     post {
         always {
-            node('any') {
-                cleanWs()
-            }
+            cleanWs()  // Clean workspace without node wrapper
         }
         success {
             echo 'Pipeline completed successfully!'

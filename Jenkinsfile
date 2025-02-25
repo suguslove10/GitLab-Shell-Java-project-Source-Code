@@ -7,7 +7,6 @@ pipeline {
     
     environment {
         // Define environment variables
-        AWS_CREDENTIALS = credentials('aws-credentials')  // Using a credentials binding
         AWS_REGION = 'us-east-1' // Change to your preferred region
         ECR_REPOSITORY_NAME = 'java-app-repo'
         IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.substring(0,7)}"
@@ -254,16 +253,21 @@ spec:
     
     post {
         success {
-            echo "Pipeline completed successfully!"
-            echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
-            echo "Image tag: ${IMAGE_TAG}"
+            node {
+                echo "Pipeline completed successfully!"
+                echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
+                echo "Image tag: ${IMAGE_TAG}"
+            }
         }
         failure {
-            echo "Pipeline failed. Please check the logs for details."
+            node {
+                echo "Pipeline failed. Please check the logs for details."
+            }
         }
         always {
-            // Clean workspace
-            cleanWs()
+            node {
+                cleanWs()
+            }
         }
     }
 }

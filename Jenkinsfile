@@ -1,87 +1,206 @@
 pipeline {
     agent any
-
+    
     environment {
-        AWS_ACCESS_KEY_ID     = credentials('AWS_ACCESS_KEY_ID')
-        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
-        AWS_REGION            = 'ap-south-1'  // Change to your AWS region
-        ECR_REPO_NAME         = 'gitlab-shell-java-repo'
-        EKS_CLUSTER_NAME      = 'extravagant-rock-otter'
-        IMAGE_TAG             = "v1.${BUILD_NUMBER}"
+        // Define environment variables
+        AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')
+        AWS_REGION = 'us-east-1' // Change to your preferred region
+        ECR_REPOSITORY_NAME = 'java-app-repo'
+        ECR_REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.substring(0,7)}"
+        KUBECONFIG = credentials('eks-kubeconfig')
+        EKS_CLUSTER_NAME = 'my-eks-cluster'
+        APP_NAME = 'java-app'
+        NAMESPACE = 'production'
     }
-
+    
     stages {
-        stage('Checkout Code') {
+        stage('Code Checkout') {
             steps {
-                git 'https://github.com/suguslove10/GitLab-Shell-Java-project-Source-Code.git'
+                checkout scm
+                // Display the commit information for traceability
+                sh 'git log -1'
             }
         }
-
+        
         stage('Increment Version') {
             steps {
-                sh '''
-                echo "Incrementing version..."
-                echo $IMAGE_TAG > version.txt
-                git config --global user.email "your-email@example.com"
-                git config --global user.name "Jenkins"
-                git add version.txt
-                git commit -m "Increment version to $IMAGE_TAG"
-                git push origin main
-                '''
+                script {
+                    // Read current version from pom.xml
+                    def pom = readMavenPom file: 'pom.xml'
+                    def currentVersion = pom.version
+                    echo "Current version: ${currentVersion}"
+                    
+                    // Increment patch version (you can adjust this logic as needed)
+                    def versionParts = currentVersion.split('\\.')
+                    def major = versionParts[0]
+                    def minor = versionParts[1]
+                    def patch = versionParts[2].toInteger() + 1
+                    def newVersion = "${major}.${minor}.${patch}"
+                    
+                    // Update pom.xml with new version
+                    sh "mvn versions:set -DnewVersion=${newVersion}"
+                    
+                    // Store new version for later stages
+                    env.APP_VERSION = newVersion
+                    echo "New version: ${env.APP_VERSION}"
+                }
             }
         }
-
-        stage('Build Java Application') {
+        
+        stage('Build Maven Artifact') {
             steps {
-                sh 'mvn clean package'
+                sh 'mvn clean package -DskipTests'
+                
+                // Archive the artifacts for later use
+                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
             }
         }
-
-        stage('Authenticate AWS ECR') {
+        
+        stage('Run Tests') {
             steps {
-                sh '''
-                aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin <AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com
-                '''
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
             }
         }
-
-        stage('Build and Push Docker Image to ECR') {
+        
+        stage('Create ECR Repository if Not Exists') {
             steps {
-                sh '''
-                docker build -t $ECR_REPO_NAME:$IMAGE_TAG .
-                docker tag $ECR_REPO_NAME:$IMAGE_TAG <AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
-                docker push <AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
-                '''
+                script {
+                    // Check if repository exists and create if it doesn't
+                    sh """
+                    aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
+                    aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
+                    """
+                }
             }
         }
-
-        stage('Deploy to EKS Cluster') {
+        
+        stage('Build and Push Docker Image') {
             steps {
-                sh '''
-                aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
-                kubectl set image deployment/my-deployment my-container=<AWS_ACCOUNT_ID>.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO_NAME:$IMAGE_TAG
-                kubectl rollout status deployment/my-deployment
-                '''
+                script {
+                    // Authenticate with ECR
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
+                    
+                    // Build the Docker image
+                    sh "docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest ."
+                    
+                    // Push the Docker image to ECR
+                    sh "docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+                    sh "docker push ${ECR_REPOSITORY_URI}:latest"
+                    
+                    // Clean up local images to save space
+                    sh "docker rmi ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+                    sh "docker rmi ${ECR_REPOSITORY_URI}:latest"
+                }
             }
         }
-
+        
+        stage('Configure kubectl') {
+            steps {
+                sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+            }
+        }
+        
+        stage('Deploy to EKS') {
+            steps {
+                script {
+                    // Apply Kubernetes manifests
+                    // First, create the namespace if it doesn't exist
+                    sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
+                    
+                    // Create deployment.yaml dynamically
+                    sh """
+                    cat <<EOF > deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: "${env.APP_VERSION}"
+    spec:
+      containers:
+      - name: ${APP_NAME}
+        image: ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: "0.5"
+            memory: "512Mi"
+          requests:
+            cpu: "0.2"
+            memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP
+EOF
+                    """
+                    
+                    // Apply the deployment and service
+                    sh "kubectl apply -f deployment.yaml"
+                    
+                    // Wait for the deployment to be ready
+                    sh "kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m"
+                }
+            }
+        }
+        
         stage('Commit Version Update') {
             steps {
-                sh '''
-                git add version.txt
-                git commit -m "Updated to version $IMAGE_TAG"
-                git push origin main
-                '''
+                script {
+                    // Configure Git user
+                    sh 'git config user.email "jenkins@example.com"'
+                    sh 'git config user.name "Jenkins CI"'
+                    
+                    // Commit the updated pom.xml
+                    sh 'git add pom.xml'
+                    sh "git commit -m 'Bump version to ${env.APP_VERSION} [CI SKIP]'"
+                    
+                    // Push the commit back to the repository
+                    withCredentials([usernamePassword(credentialsId: 'github-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/java-app-repo.git HEAD:${env.BRANCH_NAME}"
+                    }
+                }
             }
         }
     }
-
+    
     post {
         success {
-            echo 'CI/CD Pipeline executed successfully!'
+            echo "Pipeline completed successfully!"
+            echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
+            echo "Image tag: ${IMAGE_TAG}"
         }
         failure {
-            echo 'Pipeline failed!'
+            echo "Pipeline failed. Please check the logs for details."
+        }
+        always {
+            // Clean workspace
+            cleanWs()
         }
     }
 }

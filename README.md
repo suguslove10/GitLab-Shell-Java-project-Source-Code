@@ -116,7 +116,6 @@ project-root/
 ├── pom.xml                # Maven project configuration
 ├── src/                   # Java source code
 ├── Dockerfile             # Docker image definition
-└── deployment.yaml        # Kubernetes deployment template (created by pipeline)
 ```
 
 ## Running the Pipeline

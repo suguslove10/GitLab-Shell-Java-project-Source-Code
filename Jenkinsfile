@@ -15,6 +15,10 @@ pipeline {
         NAMESPACE = 'production'
         // Add Git branch variable to use throughout the pipeline
         GIT_BRANCH = "${env.BRANCH_NAME ?: 'main'}"
+        // Add domain name for ingress
+        APP_DOMAIN = 'java-app.example.com' // Change this to your actual domain
+        // Service type - options are: ClusterIP, NodePort, LoadBalancer
+        SERVICE_TYPE = 'LoadBalancer'
     }
     
     stages {
@@ -175,7 +179,60 @@ pipeline {
                         // Create namespace if it doesn't exist
                         sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
                         
-                        // Create deployment YAML file
+                        // Create deployment YAML file with selected service type
+                        def serviceConfig = ""
+                        
+                        // Configure service based on type
+                        if (env.SERVICE_TYPE == 'LoadBalancer') {
+                            serviceConfig = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: LoadBalancer
+"""
+                        } else if (env.SERVICE_TYPE == 'NodePort') {
+                            serviceConfig = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+  ports:
+  - port: 80
+    targetPort: 8080
+    nodePort: 30080
+  type: NodePort
+"""
+                        } else {
+                            // Default to ClusterIP
+                            serviceConfig = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP
+"""
+                        }
+                        
+                        // Write deployment and service files
                         writeFile file: 'deployment.yaml', text: """
 apiVersion: apps/v1
 kind: Deployment
@@ -206,25 +263,89 @@ spec:
             cpu: "0.2"
             memory: "256Mi"
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${APP_NAME}
-  namespace: ${NAMESPACE}
-spec:
-  selector:
-    app: ${APP_NAME}
-  ports:
-  - port: 80
-    targetPort: 8080
-  type: ClusterIP
+${serviceConfig}
 """
+                        
+                        // Create ingress if needed
+                        if (env.SERVICE_TYPE == 'ClusterIP') {
+                            writeFile file: 'ingress.yaml', text: """
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${APP_NAME}-ingress
+  namespace: ${NAMESPACE}
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+spec:
+  rules:
+  - host: ${APP_DOMAIN}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${APP_NAME}
+            port:
+              number: 80
+"""
+                            sh "kubectl apply -f ingress.yaml"
+                        }
                         
                         // Apply the deployment and service
                         sh "kubectl apply -f deployment.yaml"
                         
                         // Wait for the deployment to be ready
                         sh "kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m"
+                        
+                        // Get service information
+                        if (env.SERVICE_TYPE == 'LoadBalancer') {
+                            // Wait for LoadBalancer to get external IP (timeout after 300 seconds)
+                            sh '''
+                            echo "Waiting for LoadBalancer to be ready..."
+                            TIMER=0
+                            while [ \$TIMER -lt 60 ]; do
+                                LB_HOSTNAME=$(kubectl get svc ${APP_NAME} -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                                if [ -n "$LB_HOSTNAME" ]; then
+                                    echo "Application is accessible at: http://$LB_HOSTNAME"
+                                    break
+                                fi
+                                echo "Still waiting for LoadBalancer... (\$TIMER/60)"
+                                TIMER=\$((TIMER+5))
+                                sleep 5
+                            done
+                            
+                            # Save access URL to a file that will be archived
+                            mkdir -p access-info
+                            kubectl get svc ${APP_NAME} -n ${NAMESPACE} -o wide > access-info/service-details.txt
+                            LB_HOSTNAME=$(kubectl get svc ${APP_NAME} -n ${NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                            echo "Application URL: http://$LB_HOSTNAME" > access-info/access-url.txt
+                            '''
+                        } else if (env.SERVICE_TYPE == 'NodePort') {
+                            sh '''
+                            NODE_PORT=$(kubectl get svc ${APP_NAME} -n ${NAMESPACE} -o jsonpath='{.spec.ports[0].nodePort}')
+                            NODE_IPS=$(kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="ExternalIP")].address}')
+                            
+                            # Save access info
+                            mkdir -p access-info
+                            kubectl get svc ${APP_NAME} -n ${NAMESPACE} -o wide > access-info/service-details.txt
+                            echo "Access application at any of these URLs:" > access-info/access-url.txt
+                            for ip in $NODE_IPS; do
+                                echo "http://$ip:$NODE_PORT" >> access-info/access-url.txt
+                            done
+                            '''
+                        } else {
+                            // ClusterIP with Ingress
+                            sh '''
+                            mkdir -p access-info
+                            kubectl get svc ${APP_NAME} -n ${NAMESPACE} -o wide > access-info/service-details.txt
+                            echo "Application URL: http://${APP_DOMAIN}" > access-info/access-url.txt
+                            echo "Note: Ensure your DNS is configured to point ${APP_DOMAIN} to your ingress controller" >> access-info/access-url.txt
+                            '''
+                        }
+                        
+                        // Archive the access information
+                        archiveArtifacts artifacts: 'access-info/**', fingerprint: true
                     }
                 }
             }
@@ -267,9 +388,14 @@ spec:
     
     post {
         success {
-            echo "Pipeline completed successfully!"
-            echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
-            echo "Image tag: ${IMAGE_TAG}"
+            script {
+                // Display access information
+                sh 'cat access-info/access-url.txt || echo "Access information not available"'
+                
+                echo "Pipeline completed successfully!"
+                echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
+                echo "Image tag: ${IMAGE_TAG}"
+            }
         }
         failure {
             echo "Pipeline failed. Please check the logs for details."

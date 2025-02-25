@@ -8,10 +8,10 @@ pipeline {
         ECR_REPOSITORY_NAME = 'java-app-repo'
         ECR_REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
         IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.substring(0,7)}"
-        KUBECONFIG = credentials('eks-kubeconfig')
         EKS_CLUSTER_NAME = 'my-eks-cluster'
         APP_NAME = 'java-app'
         NAMESPACE = 'production'
+        // AWS credentials will be provided by withCredentials block
     }
     
     stages {
@@ -70,52 +70,65 @@ pipeline {
         
         stage('Create ECR Repository if Not Exists') {
             steps {
-                script {
-                    // Check if repository exists and create if it doesn't
-                    sh """
-                    aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
-                    aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
-                    """
+                withCredentials([
+                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    script {
+                        // Check if repository exists and create if it doesn't
+                        sh """
+                        aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
+                        aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
+                        """
+                    }
                 }
             }
         }
         
         stage('Build and Push Docker Image') {
             steps {
-                script {
-                    // Authenticate with ECR
-                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
-                    
-                    // Build the Docker image
-                    sh "docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest ."
-                    
-                    // Push the Docker image to ECR
-                    sh "docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
-                    sh "docker push ${ECR_REPOSITORY_URI}:latest"
-                    
-                    // Clean up local images to save space
-                    sh "docker rmi ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
-                    sh "docker rmi ${ECR_REPOSITORY_URI}:latest"
+                withCredentials([
+                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    script {
+                        // Authenticate with ECR
+                        sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
+                        
+                        // Build the Docker image
+                        sh "docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest ."
+                        
+                        // Push the Docker image to ECR
+                        sh "docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+                        sh "docker push ${ECR_REPOSITORY_URI}:latest"
+                        
+                        // Clean up local images to save space
+                        sh "docker rmi ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+                        sh "docker rmi ${ECR_REPOSITORY_URI}:latest"
+                    }
                 }
-            }
-        }
-        
-        stage('Configure kubectl') {
-            steps {
-                sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
             }
         }
         
         stage('Deploy to EKS') {
             steps {
-                script {
-                    // Apply Kubernetes manifests
-                    // First, create the namespace if it doesn't exist
-                    sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
-                    
-                    // Create deployment.yaml dynamically
-                    sh """
-                    cat <<EOF > deployment.yaml
+                withCredentials([
+                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    script {
+                        // Configure kubectl to connect to your EKS cluster
+                        sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                        
+                        // Test the connection
+                        sh "kubectl get nodes"
+                        
+                        // Create namespace if it doesn't exist
+                        sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
+                        
+                        // Create deployment.yaml dynamically
+                        sh """
+                        cat <<EOF > deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -158,13 +171,14 @@ spec:
     targetPort: 8080
   type: ClusterIP
 EOF
-                    """
-                    
-                    // Apply the deployment and service
-                    sh "kubectl apply -f deployment.yaml"
-                    
-                    // Wait for the deployment to be ready
-                    sh "kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m"
+                        """
+                        
+                        // Apply the deployment and service
+                        sh "kubectl apply -f deployment.yaml"
+                        
+                        // Wait for the deployment to be ready
+                        sh "kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m"
+                    }
                 }
             }
         }

@@ -15,7 +15,7 @@ pipeline {
         EKS_CLUSTER_NAME = 'my-eks-cluster'
         APP_NAME = 'java-app'
         NAMESPACE = 'production'
-        // AWS credentials will be provided by withCredentials block
+        AWS_CLI_PATH = '/opt/homebrew/bin/aws' // Full path to AWS CLI on macOS
     }
     
     stages {
@@ -95,8 +95,8 @@ pipeline {
                     script {
                         // Check if repository exists and create if it doesn't
                         sh """
-                        aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
-                        aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
+                        ${env.AWS_CLI_PATH} ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
+                        ${env.AWS_CLI_PATH} ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
                         """
                     }
                 }
@@ -111,9 +111,9 @@ pipeline {
                 ]) {
                     script {
                         // Authenticate with ECR
-                        sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
+                        sh "${env.AWS_CLI_PATH} ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
                         
-                        // Build the Docker image - note we're working with a WAR file
+                        // Build the Docker image
                         sh "docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest ."
                         
                         // Push the Docker image to ECR
@@ -136,7 +136,7 @@ pipeline {
                 ]) {
                     script {
                         // Configure kubectl to connect to your EKS cluster
-                        sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                        sh "${env.AWS_CLI_PATH} eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
                         
                         // Test the connection
                         sh "kubectl get nodes"

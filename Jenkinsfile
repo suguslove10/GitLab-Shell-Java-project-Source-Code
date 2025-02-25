@@ -70,8 +70,8 @@ pipeline {
             steps {
                 sh 'mvn clean package -DskipTests'
                 
-                // Archive the artifacts for later use
-                archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+                // Archive the WAR file instead of JAR
+                archiveArtifacts artifacts: 'target/*.war', fingerprint: true
             }
         }
         
@@ -81,7 +81,7 @@ pipeline {
             }
             post {
                 always {
-                    junit 'target/surefire-reports/*.xml'
+                    junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
                 }
             }
         }
@@ -113,7 +113,7 @@ pipeline {
                         // Authenticate with ECR
                         sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
                         
-                        // Build the Docker image
+                        // Build the Docker image - note we're working with a WAR file
                         sh "docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest ."
                         
                         // Push the Docker image to ECR

@@ -7,24 +7,28 @@ pipeline {
     
     environment {
         // Define environment variables
-        AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')
+        AWS_CREDENTIALS = credentials('aws-credentials')  // Using a credentials binding
         AWS_REGION = 'us-east-1' // Change to your preferred region
         ECR_REPOSITORY_NAME = 'java-app-repo'
-        ECR_REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
         IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.substring(0,7)}"
         EKS_CLUSTER_NAME = 'my-eks-cluster'
         APP_NAME = 'java-app'
         NAMESPACE = 'production'
         AWS_CLI_PATH = '/opt/homebrew/bin/aws' // Full path to AWS CLI on macOS
-        DOCKER_PATH = '/opt/homebrew/bin/docker' // Full path to Docker on macOS
+        DOCKER_PATH = '/usr/local/bin/docker' // Correct path to Docker on your system
     }
     
     stages {
         stage('Verify Tools') {
             steps {
-                sh 'which docker || echo "Docker not found"'
-                sh 'which aws || echo "AWS CLI not found"'
-                sh 'mvn --version'
+                sh '''
+                    echo "Checking for Docker..."
+                    ls -la ${DOCKER_PATH} || echo "Docker not found at specified path"
+                    echo "Checking for AWS CLI..."
+                    ${AWS_CLI_PATH} --version || echo "AWS CLI not found or not working"
+                    echo "Checking Maven..."
+                    mvn --version
+                '''
             }
         }
         
@@ -116,32 +120,37 @@ pipeline {
             steps {
                 withCredentials([
                     string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'AWS_ACCOUNT_ID', variable: 'AWS_ACCOUNT_ID')
                 ]) {
                     script {
+                        def ecrUri = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+                        
+                        // Verify Docker path
+                        sh "ls -la ${DOCKER_PATH} || echo 'Docker binary not found!'"
+                        
                         // Authenticate with ECR - using a safer approach to avoid credential exposure
                         sh """
                         ${env.AWS_CLI_PATH} ecr get-login-password --region ${AWS_REGION} > ecr_password.txt
-                        cat ecr_password.txt | ${env.DOCKER_PATH} login --username AWS --password-stdin \$REPOSITORY_URI
+                        cat ecr_password.txt | ${env.DOCKER_PATH} login --username AWS --password-stdin ${ecrUri}
                         rm ecr_password.txt
                         """
                         
                         // Build the Docker image
-                        sh "${env.DOCKER_PATH} build -t \$REPOSITORY_URI:${IMAGE_TAG} -t \$REPOSITORY_URI:latest ."
+                        sh "${env.DOCKER_PATH} build -t ${ecrUri}:${IMAGE_TAG} -t ${ecrUri}:latest ."
                         
                         // Push the Docker image to ECR
-                        sh "${env.DOCKER_PATH} push \$REPOSITORY_URI:${IMAGE_TAG}"
-                        sh "${env.DOCKER_PATH} push \$REPOSITORY_URI:latest"
+                        sh "${env.DOCKER_PATH} push ${ecrUri}:${IMAGE_TAG}"
+                        sh "${env.DOCKER_PATH} push ${ecrUri}:latest"
                         
                         // Clean up local images to save space
-                        sh "${env.DOCKER_PATH} rmi \$REPOSITORY_URI:${IMAGE_TAG}"
-                        sh "${env.DOCKER_PATH} rmi \$REPOSITORY_URI:latest"
+                        sh "${env.DOCKER_PATH} rmi ${ecrUri}:${IMAGE_TAG}"
+                        sh "${env.DOCKER_PATH} rmi ${ecrUri}:latest"
+                        
+                        // Store the ECR URI for later stages
+                        env.ECR_URI = ecrUri
                     }
                 }
-            }
-            environment {
-                // Define REPOSITORY_URI in the environment to avoid Groovy string interpolation with credentials
-                REPOSITORY_URI = "${ECR_REPOSITORY_URI}"
             }
         }
         
@@ -149,9 +158,12 @@ pipeline {
             steps {
                 withCredentials([
                     string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'AWS_ACCOUNT_ID', variable: 'AWS_ACCOUNT_ID')
                 ]) {
                     script {
+                        def ecrUri = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
+                        
                         // Configure kubectl to connect to your EKS cluster
                         sh "${env.AWS_CLI_PATH} eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
                         
@@ -161,7 +173,7 @@ pipeline {
                         // Create namespace if it doesn't exist
                         sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
                         
-                        // Use env variables to avoid exposing secrets through string interpolation
+                        // Create deployment YAML file
                         writeFile file: 'deployment.yaml', text: """
 apiVersion: apps/v1
 kind: Deployment
@@ -181,7 +193,7 @@ spec:
     spec:
       containers:
       - name: ${APP_NAME}
-        image: \$REPOSITORY_URI:${IMAGE_TAG}
+        image: ${ecrUri}:${IMAGE_TAG}
         ports:
         - containerPort: 8080
         resources:
@@ -207,7 +219,7 @@ spec:
 """
                         
                         // Apply the deployment and service
-                        sh "REPOSITORY_URI=${ECR_REPOSITORY_URI} envsubst < deployment.yaml | kubectl apply -f -"
+                        sh "kubectl apply -f deployment.yaml"
                         
                         // Wait for the deployment to be ready
                         sh "kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m"
@@ -229,13 +241,11 @@ spec:
                     
                     // Push the commit back to the repository
                     withCredentials([usernamePassword(credentialsId: 'github-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
-                        // Use a more secure way to pass credentials to git push
-                        withEnv(["HTTPS_URL=https://github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git"]) {
-                            sh '''
-                                git remote set-url origin https://${GIT_USERNAME}:${GIT_PASSWORD}@${HTTPS_URL#https://}
-                                git push origin HEAD:${BRANCH_NAME}
-                            '''
-                        }
+                        // Use a more secure way to handle Git credentials
+                        sh '''
+                            git remote set-url origin https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git
+                            git push origin HEAD:${BRANCH_NAME}
+                        '''
                     }
                 }
             }

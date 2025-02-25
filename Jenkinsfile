@@ -7,14 +7,12 @@ pipeline {
     
     environment {
         // Define environment variables
-        AWS_REGION = 'us-east-1' // Change to your preferred region
+        AWS_REGION = 'us-east-1'
         ECR_REPOSITORY_NAME = 'java-app-repo'
         IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.substring(0,7)}"
         EKS_CLUSTER_NAME = 'my-eks-cluster'
         APP_NAME = 'java-app'
         NAMESPACE = 'production'
-        AWS_CLI_PATH = '/opt/homebrew/bin/aws' // Full path to AWS CLI on macOS
-        DOCKER_PATH = '/usr/local/bin/docker' // Correct path to Docker on your system
     }
     
     stages {
@@ -22,9 +20,14 @@ pipeline {
             steps {
                 sh '''
                     echo "Checking for Docker..."
-                    ls -la ${DOCKER_PATH} || echo "Docker not found at specified path"
+                    docker --version || echo "Docker not found"
+                    
                     echo "Checking for AWS CLI..."
-                    ${AWS_CLI_PATH} --version || echo "AWS CLI not found or not working"
+                    aws --version || echo "AWS CLI not found"
+                    
+                    echo "Checking for kubectl..."
+                    kubectl version --client || echo "kubectl not found"
+                    
                     echo "Checking Maven..."
                     mvn --version
                 '''
@@ -82,7 +85,7 @@ pipeline {
             steps {
                 sh 'mvn clean package -DskipTests'
                 
-                // Archive the WAR file instead of JAR
+                // Archive the WAR file
                 archiveArtifacts artifacts: 'target/*.war', fingerprint: true
             }
         }
@@ -106,10 +109,10 @@ pipeline {
                 ]) {
                     script {
                         // Check if repository exists and create if it doesn't
-                        sh """
-                        ${env.AWS_CLI_PATH} ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
-                        ${env.AWS_CLI_PATH} ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
-                        """
+                        sh '''
+                        aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} --region ${AWS_REGION} || \
+                        aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} --region ${AWS_REGION}
+                        '''
                     }
                 }
             }
@@ -125,26 +128,22 @@ pipeline {
                     script {
                         def ecrUri = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
                         
-                        // Verify Docker path
-                        sh "ls -la ${DOCKER_PATH} || echo 'Docker binary not found!'"
-                        
-                        // Authenticate with ECR - using a safer approach to avoid credential exposure
-                        sh """
-                        ${env.AWS_CLI_PATH} ecr get-login-password --region ${AWS_REGION} > ecr_password.txt
-                        cat ecr_password.txt | ${env.DOCKER_PATH} login --username AWS --password-stdin ${ecrUri}
-                        rm ecr_password.txt
-                        """
+                        // Authenticate with ECR
+                        sh '''
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        '''
                         
                         // Build the Docker image
-                        sh "${env.DOCKER_PATH} build -t ${ecrUri}:${IMAGE_TAG} -t ${ecrUri}:latest ."
+                        sh "docker build -t ${ecrUri}:${IMAGE_TAG} -t ${ecrUri}:latest ."
                         
                         // Push the Docker image to ECR
-                        sh "${env.DOCKER_PATH} push ${ecrUri}:${IMAGE_TAG}"
-                        sh "${env.DOCKER_PATH} push ${ecrUri}:latest"
+                        sh "docker push ${ecrUri}:${IMAGE_TAG}"
+                        sh "docker push ${ecrUri}:latest"
                         
                         // Clean up local images to save space
-                        sh "${env.DOCKER_PATH} rmi ${ecrUri}:${IMAGE_TAG}"
-                        sh "${env.DOCKER_PATH} rmi ${ecrUri}:latest"
+                        sh "docker rmi ${ecrUri}:${IMAGE_TAG}"
+                        sh "docker rmi ${ecrUri}:latest"
                         
                         // Store the ECR URI for later stages
                         env.ECR_URI = ecrUri
@@ -164,7 +163,7 @@ pipeline {
                         def ecrUri = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
                         
                         // Configure kubectl to connect to your EKS cluster
-                        sh "${env.AWS_CLI_PATH} eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
+                        sh "aws eks update-kubeconfig --name ${EKS_CLUSTER_NAME} --region ${AWS_REGION}"
                         
                         // Test the connection
                         sh "kubectl get nodes"
@@ -240,7 +239,6 @@ spec:
                     
                     // Push the commit back to the repository
                     withCredentials([usernamePassword(credentialsId: 'github-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
-                        // Use a more secure way to handle Git credentials
                         sh '''
                             git remote set-url origin https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git
                             git push origin HEAD:${BRANCH_NAME}
@@ -253,21 +251,15 @@ spec:
     
     post {
         success {
-            node {
-                echo "Pipeline completed successfully!"
-                echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
-                echo "Image tag: ${IMAGE_TAG}"
-            }
+            echo "Pipeline completed successfully!"
+            echo "Application version ${env.APP_VERSION} deployed to EKS cluster ${EKS_CLUSTER_NAME}"
+            echo "Image tag: ${IMAGE_TAG}"
         }
         failure {
-            node {
-                echo "Pipeline failed. Please check the logs for details."
-            }
+            echo "Pipeline failed. Please check the logs for details."
         }
         always {
-            node {
-                cleanWs()
-            }
+            cleanWs()
         }
     }
 }

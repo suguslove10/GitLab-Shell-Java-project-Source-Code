@@ -1,6 +1,10 @@
 pipeline {
     agent any
     
+    tools {
+        maven 'Maven 3.8.4'  // Use the name you defined in the global tool configuration
+    }
+    
     environment {
         // Define environment variables
         AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')

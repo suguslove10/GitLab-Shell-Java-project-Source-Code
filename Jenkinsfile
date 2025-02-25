@@ -31,12 +31,26 @@ pipeline {
                     def currentVersion = pom.version
                     echo "Current version: ${currentVersion}"
                     
-                    // Increment patch version (you can adjust this logic as needed)
+                    // Increment version safely, handling both 2-part and 3-part versions
                     def versionParts = currentVersion.split('\\.')
-                    def major = versionParts[0]
-                    def minor = versionParts[1]
-                    def patch = versionParts[2].toInteger() + 1
-                    def newVersion = "${major}.${minor}.${patch}"
+                    def newVersion
+                    
+                    if (versionParts.size() >= 3) {
+                        // Handle 3-part version (e.g., 1.0.0)
+                        def major = versionParts[0]
+                        def minor = versionParts[1]
+                        def patch = versionParts[2].toInteger() + 1
+                        newVersion = "${major}.${minor}.${patch}"
+                    } else if (versionParts.size() == 2) {
+                        // Handle 2-part version (e.g., 1.0)
+                        def major = versionParts[0]
+                        def minor = versionParts[1].toInteger() + 1
+                        newVersion = "${major}.${minor}"
+                    } else {
+                        // Handle single digit version (e.g., 1)
+                        def major = versionParts[0].toInteger() + 1
+                        newVersion = "${major}"
+                    }
                     
                     // Update pom.xml with new version
                     sh "mvn versions:set -DnewVersion=${newVersion}"
@@ -196,7 +210,7 @@ EOF
                     
                     // Push the commit back to the repository
                     withCredentials([usernamePassword(credentialsId: 'github-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
-                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/java-app-repo.git HEAD:${env.BRANCH_NAME}"
+                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git HEAD:${env.BRANCH_NAME}"
                     }
                 }
             }

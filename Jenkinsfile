@@ -9,10 +9,12 @@ pipeline {
         // Define environment variables
         AWS_REGION = 'us-east-1'
         ECR_REPOSITORY_NAME = 'java-app-repo'
-        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.substring(0,7)}"
+        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT ? env.GIT_COMMIT.substring(0,7) : 'unknown'}"
         EKS_CLUSTER_NAME = 'my-eks-cluster'
         APP_NAME = 'java-app'
         NAMESPACE = 'production'
+        // Add Git branch variable to use throughout the pipeline
+        GIT_BRANCH = "${env.BRANCH_NAME ?: 'main'}"
     }
     
     stages {
@@ -39,6 +41,8 @@ pipeline {
                 checkout scm
                 // Display the commit information for traceability
                 sh 'git log -1'
+                // Display current branch
+                sh 'git branch --show-current'
             }
         }
         
@@ -237,11 +241,23 @@ spec:
                     sh 'git add pom.xml'
                     sh "git commit -m 'Bump version to ${env.APP_VERSION} [CI SKIP]'"
                     
-                    // Push the commit back to the repository
+                    // Push the commit back to the repository with proper branch name
                     withCredentials([usernamePassword(credentialsId: 'github-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                        // Fixed: Make sure we have a valid branch to push to
                         sh '''
+                            # Get current branch or use GIT_BRANCH default
+                            CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                            if [ "$CURRENT_BRANCH" = "HEAD" ]; then
+                                CURRENT_BRANCH=${GIT_BRANCH}
+                            fi
+                            
+                            # Setup remote with credentials
                             git remote set-url origin https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git
-                            git push origin HEAD:${BRANCH_NAME}
+                            
+                            # Push with explicit branch name
+                            git push origin HEAD:${CURRENT_BRANCH}
+                            
+                            echo "Successfully pushed to branch: ${CURRENT_BRANCH}"
                         '''
                     }
                 }

@@ -16,9 +16,18 @@ pipeline {
         APP_NAME = 'java-app'
         NAMESPACE = 'production'
         AWS_CLI_PATH = '/opt/homebrew/bin/aws' // Full path to AWS CLI on macOS
+        DOCKER_PATH = '/opt/homebrew/bin/docker' // Full path to Docker on macOS
     }
     
     stages {
+        stage('Verify Tools') {
+            steps {
+                sh 'which docker || echo "Docker not found"'
+                sh 'which aws || echo "AWS CLI not found"'
+                sh 'mvn --version'
+            }
+        }
+        
         stage('Code Checkout') {
             steps {
                 checkout scm
@@ -110,21 +119,29 @@ pipeline {
                     string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
                 ]) {
                     script {
-                        // Authenticate with ECR
-                        sh "${env.AWS_CLI_PATH} ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPOSITORY_URI}"
+                        // Authenticate with ECR - using a safer approach to avoid credential exposure
+                        sh """
+                        ${env.AWS_CLI_PATH} ecr get-login-password --region ${AWS_REGION} > ecr_password.txt
+                        cat ecr_password.txt | ${env.DOCKER_PATH} login --username AWS --password-stdin \$REPOSITORY_URI
+                        rm ecr_password.txt
+                        """
                         
                         // Build the Docker image
-                        sh "docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest ."
+                        sh "${env.DOCKER_PATH} build -t \$REPOSITORY_URI:${IMAGE_TAG} -t \$REPOSITORY_URI:latest ."
                         
                         // Push the Docker image to ECR
-                        sh "docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
-                        sh "docker push ${ECR_REPOSITORY_URI}:latest"
+                        sh "${env.DOCKER_PATH} push \$REPOSITORY_URI:${IMAGE_TAG}"
+                        sh "${env.DOCKER_PATH} push \$REPOSITORY_URI:latest"
                         
                         // Clean up local images to save space
-                        sh "docker rmi ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
-                        sh "docker rmi ${ECR_REPOSITORY_URI}:latest"
+                        sh "${env.DOCKER_PATH} rmi \$REPOSITORY_URI:${IMAGE_TAG}"
+                        sh "${env.DOCKER_PATH} rmi \$REPOSITORY_URI:latest"
                     }
                 }
+            }
+            environment {
+                // Define REPOSITORY_URI in the environment to avoid Groovy string interpolation with credentials
+                REPOSITORY_URI = "${ECR_REPOSITORY_URI}"
             }
         }
         
@@ -144,9 +161,8 @@ pipeline {
                         // Create namespace if it doesn't exist
                         sh "kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -"
                         
-                        // Create deployment.yaml dynamically
-                        sh """
-                        cat <<EOF > deployment.yaml
+                        // Use env variables to avoid exposing secrets through string interpolation
+                        writeFile file: 'deployment.yaml', text: """
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -165,7 +181,7 @@ spec:
     spec:
       containers:
       - name: ${APP_NAME}
-        image: ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+        image: \$REPOSITORY_URI:${IMAGE_TAG}
         ports:
         - containerPort: 8080
         resources:
@@ -188,11 +204,10 @@ spec:
   - port: 80
     targetPort: 8080
   type: ClusterIP
-EOF
-                        """
+"""
                         
                         // Apply the deployment and service
-                        sh "kubectl apply -f deployment.yaml"
+                        sh "REPOSITORY_URI=${ECR_REPOSITORY_URI} envsubst < deployment.yaml | kubectl apply -f -"
                         
                         // Wait for the deployment to be ready
                         sh "kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m"
@@ -214,7 +229,13 @@ EOF
                     
                     // Push the commit back to the repository
                     withCredentials([usernamePassword(credentialsId: 'github-credentials', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
-                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git HEAD:${env.BRANCH_NAME}"
+                        // Use a more secure way to pass credentials to git push
+                        withEnv(["HTTPS_URL=https://github.com/${GIT_USERNAME}/GitLab-Shell-Java-project-Source-Code.git"]) {
+                            sh '''
+                                git remote set-url origin https://${GIT_USERNAME}:${GIT_PASSWORD}@${HTTPS_URL#https://}
+                                git push origin HEAD:${BRANCH_NAME}
+                            '''
+                        }
                     }
                 }
             }
